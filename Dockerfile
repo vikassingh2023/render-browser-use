@@ -77,12 +77,15 @@ WORKDIR /app
 COPY pyproject.toml uv.lock* /app/
 
 # Create virtualenv using uv (keeps parity with upstream)
-RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-    echo "[+] Setting up venv using uv in $VENV_DIR..." \
-    && which uv && uv --version \
-    && uv venv \
-    && which python | grep "$VENV_DIR" \
-    && python --version \
+# Create a Python virtualenv at /app/.venv (avoid using uv venv which may fail in some base images)
+RUN set -x \
+    && echo "[+] Creating virtualenv at $VENV_DIR (using python -m venv)..." \
+    && mkdir -p /app \
+    && python -m venv "$VENV_DIR" \
+    && test -x "$VENV_DIR/bin/python" \
+    && "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel \
+    && echo "[+] Virtualenv ready at $VENV_DIR; python: $($VENV_DIR/bin/python --version)" \
+    && ln -s "$VENV_DIR/bin" /venv-bin || true \
     && echo "[+] venv created" | tee -a /VERSION.txt
 
 # Use the venv's pip to upgrade tooling and confirm Playwright exists in base image
