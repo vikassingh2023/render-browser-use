@@ -73,8 +73,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copy only dependency manifest files first to leverage cache
+# Copy both dependency manifest and source early so pip install .[extra] works
 COPY pyproject.toml uv.lock* /app/
+# *** IMPORTANT: copy full source here so pip install . will find package files when installing extras ***
+COPY . /app
 
 # Create virtualenv using python -m venv (avoid unreliable uv venv at build-time)
 RUN set -x \
@@ -131,16 +133,12 @@ PY
 echo "[+] pip extras install finished" | tee -a /VERSION.txt
 BASH
 
-# Copy rest of repository
-COPY . /app
-
 # Install browser-use package and all extras into the venv using pip (avoid uv sync at build-time)
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT <<'BASH'
 set -eux
 echo "[+] Installing browser-use package into venv via pip..."
 /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel
-# Install the package itself (no-deps because extras were already installed), but keep it simple:
-# a) try to install package editable with extras if available, otherwise plain install
+# Install the package itself
 /app/.venv/bin/python -m pip install --no-cache-dir .
 which browser-use || true
 browser-use --version 2>&1 || true
@@ -148,13 +146,4 @@ echo "[+] browser-use installed" | tee -a /VERSION.txt
 BASH
 
 # Create data dirs and set ownership
-RUN mkdir -p "$DATA_DIR/profiles/default" \
-    && chown -R $BROWSERUSE_USER:$BROWSERUSE_USER "$DATA_DIR" || true \
-    && echo "[√] Docker build complete" | tee -a /VERSION.txt
-
-USER "$BROWSERUSE_USER"
-VOLUME "$DATA_DIR"
-EXPOSE 9242
-EXPOSE 9222
-
-ENTRYPOINT ["browser-use"]
+RUN mkdir -p "$DATA_DIR/profiles/d_
