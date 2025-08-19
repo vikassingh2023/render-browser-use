@@ -63,6 +63,7 @@ GOOGLE_API_KEY=
 DEEPSEEK_API_KEY=
 GROK_API_KEY=
 NOVITA_API_KEY=
+MISTRAL_API_KEY=
 ```
 
 For other settings, models, and more, check out the [documentation 📕](https://docs.browser-use.com).
