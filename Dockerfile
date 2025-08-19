@@ -30,7 +30,7 @@ LABEL name="browseruse" \
     org.opencontainers.image.source="https://github.com/browser-use/browser-use" \
     com.docker.image.source.entrypoint="Dockerfile" \
     com.docker.desktop.extension.api.version=">= 1.4.7" \
-    com.docker.desktop.extension.icon="https://avatars.githubusercontent.com/u/192012301?s=200&v=4" \
+    com.docker.extension.icon="https://avatars.githubusercontent.com/u/192012301?s=200&v=4" \
     com.docker.extension.publisher-url="https://browser-use.com" \
     com.docker.extension.screenshots='[{"alt": "Screenshot of CLI splashscreen", "url": "https://github.com/user-attachments/assets/3606d851-deb1-439e-ad90-774e7960ded8"}, {"alt": "Screenshot of CLI running", "url": "https://github.com/user-attachments/assets/d018b115-95a4-4ac5-8259-b750bc5f56ad"}]' \
     com.docker.extension.detailed-description='See here for detailed documentation: https://docs.browser-use.com' \
@@ -82,7 +82,7 @@ RUN echo 'Binary::apt::APT::Keep-Downloaded-Packages "1";' > /etc/apt/apt.conf.d
     && rm -f /etc/apt/apt.conf.d/docker-clean
 
 # Print debug info about build and save it to disk, for human eyes only, not used by anything else
-RUN (echo "[i] Docker build for Browser Use $(cat /VERSION.txt) starting..." \
+RUN (echo "[i] Docker build for Browser Use $(cat /VERSION.txt 2>/dev/null || echo 'unknown-version') starting..." \
     && echo "PLATFORM=${TARGETPLATFORM} ARCH=$(uname -m) ($(uname -s) ${TARGETARCH} ${TARGETVARIANT})" \
     && echo "BUILD_START_TIME=$(date +"%Y-%m-%d %H:%M:%S %s") TZ=${TZ} LANG=${LANG}" \
     && echo \
@@ -92,7 +92,7 @@ RUN (echo "[i] Docker build for Browser Use $(cat /VERSION.txt) starting..." \
     && cat /etc/os-release | head -n7 \
     && which bash && bash --version | head -n1 \
     && which dpkg && dpkg --version | head -n1 \
-    && echo -e '\n\n' && env && echo -e '\n\n' \
+    && echo -e '\n\n' && env | sort && echo -e '\n\n' \
     && which python && python --version \
     && which pip && pip --version \
     && echo -e '\n\n' \
@@ -114,29 +114,25 @@ RUN echo "[*] Setting up $BROWSERUSE_USER user uid=${DEFAULT_PUID}..." \
     # https://docs.linuxserver.io/general/understanding-puid-and-pgid
 
 # Install base apt dependencies (adding backports to access more recent apt updates)
+# NOTE: we include python3-dev and build-essential to avoid pip wheel build failures.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=apt-$TARGETARCH$TARGETVARIANT \
     echo "[+] Installing APT base system dependencies for $TARGETPLATFORM..." \
-#     && echo 'deb https://deb.debian.org/debian bookworm-backports main contrib non-free' > /etc/apt/sources.list.d/backports.list \
     && mkdir -p /etc/apt/keyrings \
     && apt-get update -qq \
     && apt-get install -qq -y --no-install-recommends \
-        # 1. packaging dependencies
+        # packaging & system utilities
         apt-transport-https ca-certificates apt-utils gnupg2 unzip curl wget grep \
-        # 2. docker and init system dependencies:
-        # dumb-init gosu cron zlib1g-dev \
-        # 3. frivolous CLI helpers to make debugging failed archiving easierL
+        # debugging helpers
         nano iputils-ping dnsutils jq \
-        # tree yq procps \
-        # 4. browser dependencies: (auto-installed by playwright install --with-deps chromium)
-     #    libnss3 libxss1 libasound2 libx11-xcb1 \
-     #    fontconfig fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-khmeros fonts-kacst fonts-symbola fonts-noto fonts-freefont-ttf \
-     #    at-spi2-common fonts-liberation fonts-noto-color-emoji fonts-tlwg-loma-otf fonts-unifont libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libavahi-client3 \
-     #    libavahi-common-data libavahi-common3 libcups2 libfontenc1 libice6 libnspr4 libnss3 libsm6 libunwind8 \
-     #    libxaw7 libxcomposite1 libxdamage1 libxfont2 \
-     #    # 5. x11/xvfb dependencies:
-     #    libxkbfile1 libxmu6 libxpm4 libxt6 x11-xkb-utils x11-utils xfonts-encodings \
-     #    xfonts-scalable xfonts-utils xserver-common xvfb \
-     && rm -rf /var/lib/apt/lists/*
+        # build tools for pip wheels if needed
+        python3-dev build-essential pkg-config procps \
+        # fonts and common deps (useful for browsers)
+        fonts-liberation fonts-noto-color-emoji fonts-dejavu-core fonts-freefont-ttf \
+        # minimal set of libs for Playwright/browser operation
+        libnss3 libnspr4 libatk-bridge2.0-0 libgtk-3-0 libxss1 libasound2 libx11-xcb1 libx11-6 libxcb1 \
+        libxcomposite1 libxdamage1 libxrandr2 libgbm1 libatk1.0-0 libcups2 libdrm2 libdbus-1-3 libpangocairo-1.0-0 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -154,56 +150,50 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$T
     ) | tee -a /VERSION.txt
 
 # Install playwright using pip (with version from pyproject.toml)
+# Use the created venv's python to avoid uv wrapper surprises and surface errors in the logs.
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-     echo "[+] Installing playwright via pip using version from pyproject.toml..." \
-     && ( \
-        uv pip install "$(grep -oP 'p....right>=([0-9.])+' pyproject.toml | head -n 1)" \
-        && uv pip install "$(grep -oP 'p....right>=([0-9.])+' pyproject.toml | tail -n 1)" \
-        && which playwright \
-        && playwright --version \
-        && echo -e '\n\n' \
-     ) | tee -a /VERSION.txt
+     echo "[+] Installing playwright and patchright via venv pip (non-hidden output)..." \
+     && PLAYWRIGHT_VERSION=$(grep -E "playwright>=" pyproject.toml | grep -o "[0-9]\+\.[0-9]\+\.[0-9]\+" | head -1 || true) \
+     && PATCHRIGHT_VERSION=$(grep -E "patchright>=" pyproject.toml | grep -o "[0-9]\+\.[0-9]\+\.[0-9]\+" | head -1 || true) \
+     && echo "Detected playwright==$PLAYWRIGHT_VERSION patchright==$PATCHRIGHT_VERSION" \
+     && /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
+     && /app/.venv/bin/python -m pip install "playwright${PLAYWRIGHT_VERSION:+==$PLAYWRIGHT_VERSION}" "patchright${PATCHRIGHT_VERSION:+==$PATCHRIGHT_VERSION}" --no-cache-dir \
+     && /app/.venv/bin/python -m playwright install --with-deps \
+     && /app/.venv/bin/playwright --version
 
-# Install Chromium using playwright
+# Install Chromium using playwright and create convenient symlinks
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=apt-$TARGETARCH$TARGETVARIANT \
     --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-    echo "[+] Installing chromium apt pkgs and binary to /root/.cache/ms-playwright..." \
+    echo "[+] Installing chromium (playwright) and creating symlinks..." \
     && apt-get update -qq \
-    && playwright install --with-deps --no-shell chromium \
-    # && playwright install --with-deps chrome \
+    && /app/.venv/bin/python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
-    && export CHROME_BINARY="$(python -c 'from playwright.sync_api import sync_playwright; print(sync_playwright().start().chromium.executable_path)')" \
-    && ln -s "$CHROME_BINARY" /usr/bin/chromium-browser \
-    && ln -s "$CHROME_BINARY" /app/chromium-browser \
+    && export CHROME_BINARY="$(/app/.venv/bin/python -c 'from playwright.sync_api import sync_playwright; print(sync_playwright().start().chromium.executable_path)')" \
+    && ln -sf "$CHROME_BINARY" /usr/bin/chromium-browser \
+    && ln -sf "$CHROME_BINARY" /app/chromium-browser \
     && mkdir -p "/home/${BROWSERUSE_USER}/.config/chromium/Crash Reports/pending/" \
     && chown -R "$BROWSERUSE_USER:$BROWSERUSE_USER" "/home/${BROWSERUSE_USER}/.config" \
-    && ( \
-        which chromium-browser && /usr/bin/chromium-browser --version \
-        && echo -e '\n\n' \
-    ) | tee -a /VERSION.txt
+    && ( which chromium-browser && /usr/bin/chromium-browser --version ) | tee -a /VERSION.txt
 
+# Install browser-use python sub-dependencies inside venv
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
      echo "[+] Installing browser-use pip sub-dependencies..." \
-     && ( \
-        uv sync --all-extras --no-dev --no-install-project \
-        && echo -e '\n\n' \
-     ) | tee -a /VERSION.txt
+     && uv sync --all-extras --no-dev --no-install-project \
+     && echo -e '\n\n' | tee -a /VERSION.txt
 
 # Copy the rest of the browser-use codebase
 COPY . /app
 
-# Install the browser-use package and all of its optional dependencies
+# Install the browser-use package and all of its optional dependencies using uv (uses the venv)
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
      echo "[+] Installing browser-use pip library from source..." \
-     && ( \
-        uv sync --all-extras --locked --no-dev \
-        && which browser-use \
-        && browser-use --version 2>&1 \
-        && echo -e '\n\n' \
-     ) | tee -a /VERSION.txt
+     && uv sync --all-extras --locked --no-dev \
+     && which browser-use \
+     && browser-use --version 2>&1 \
+     && echo -e '\n\n' | tee -a /VERSION.txt
 
 RUN mkdir -p "$DATA_DIR/profiles/default" \
-    && chown -R $BROWSERUSE_USER:$BROWSERUSE_USER "$DATA_DIR" "$DATA_DIR"/* \
+    && chown -R $BROWSERUSE_USER:$BROWSERUSE_USER "$DATA_DIR" "$DATA_DIR"/* || true \
     && ( \
         echo -e "\n\n[√] Finished Docker build successfully. Saving build summary in: /VERSION.txt" \
         && echo -e "PLATFORM=${TARGETPLATFORM} ARCH=$(uname -m) ($(uname -s) ${TARGETARCH} ${TARGETVARIANT})\n" \
