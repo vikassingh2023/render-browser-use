@@ -65,10 +65,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=apt-$TARGETARCH$T
     apt-get update -qq \
     && apt-get install -qq -y --no-install-recommends \
         apt-transport-https ca-certificates curl wget gnupg2 unzip jq iputils-ping nano \
-        python3-dev build-essential pkg-config procps fonts-liberation fonts-noto-color-emoji \
+        python3-dev python3-venv build-essential pkg-config procps fonts-liberation fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy uv binary from published image so we keep your existing uv workflow
+# Copy uv binary from published image so we keep your existing uv workflow at runtime if needed
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
@@ -76,8 +76,7 @@ WORKDIR /app
 # Copy only dependency manifest files first to leverage cache
 COPY pyproject.toml uv.lock* /app/
 
-# Create virtualenv using uv (keeps parity with upstream)
-# Create a Python virtualenv at /app/.venv (avoid using uv venv which may fail in some base images)
+# Create virtualenv using python -m venv (avoid unreliable uv venv at build-time)
 RUN set -x \
     && echo "[+] Creating virtualenv at $VENV_DIR (using python -m venv)..." \
     && mkdir -p /app \
@@ -85,7 +84,7 @@ RUN set -x \
     && test -x "$VENV_DIR/bin/python" \
     && "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel \
     && echo "[+] Virtualenv ready at $VENV_DIR; python: $($VENV_DIR/bin/python --version)" \
-    && ln -s "$VENV_DIR/bin" /venv-bin || true \
+    && ln -sf "$VENV_DIR/bin" /venv-bin || true \
     && echo "[+] venv created" | tee -a /VERSION.txt
 
 # Use the venv's pip to upgrade tooling and confirm Playwright exists in base image
@@ -93,26 +92,26 @@ RUN /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
     && echo "[+] Playwright (system) version:" \
     && python -m playwright --version || true
 
-# Install python extras declared in pyproject.toml into the venv (fallback to pip if uv sync fails)
-RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-  set -x \
-  && echo "[+] Installing python extras from pyproject.toml into venv ($VENV_DIR) via pip..." \
-  && /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
-  && /app/.venv/bin/python - <<'PY' \
-import tomllib,sys,subprocess,shlex,os
-pt='pyproject.toml'
+# Install python extras declared in pyproject.toml into the venv via a temporary helper script
+RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT <<'BASH'
+set -eux
+echo "[+] Installing python extras from pyproject.toml into venv ($VENV_DIR) via pip..."
+/app/.venv/bin/python -m pip install --upgrade pip setuptools wheel
+
+# Write a small helper script that reads pyproject.toml and installs extras via pip
+cat > /tmp/install_extras.py <<'PY'
+import tomllib, sys, subprocess, os, shlex
+pt = 'pyproject.toml'
 if not os.path.exists(pt):
     print('pyproject.toml not found; skipping extras installation')
     sys.exit(0)
-data = tomllib.loads(open(pt,'rb').read())
+data = tomllib.loads(open(pt, 'rb').read())
 extras = []
-# PEP 621 style: project.optional-dependencies (dict keys are extra names)
-proj = data.get('project',{})
+proj = data.get('project', {})
 if proj and proj.get('optional-dependencies'):
     extras = list(proj['optional-dependencies'].keys())
-# Poetry style: tool.poetry.extras
 if not extras:
-    poetry = data.get('tool',{}).get('poetry',{})
+    poetry = data.get('tool', {}).get('poetry', {})
     if poetry and poetry.get('extras'):
         extras = list(poetry['extras'].keys())
 if not extras:
@@ -121,25 +120,32 @@ if not extras:
 print('Discovered extras:', extras)
 for ex in extras:
     print('Installing extra:', ex)
-    # install package extras via pip into the venv
-    # use editable install so package is available during later build steps
     cmd = [sys.executable, '-m', 'pip', 'install', f'.[{ex}]']
     print('Running:', ' '.join(shlex.quote(c) for c in cmd))
     subprocess.check_call(cmd)
 print('All extras installed successfully')
 PY
-  && echo "[+] pip extras install finished" | tee -a /VERSION.txt
+
+# Run the helper inside the venv
+/app/.venv/bin/python /tmp/install_extras.py
+echo "[+] pip extras install finished" | tee -a /VERSION.txt
+BASH
 
 # Copy rest of repository
 COPY . /app
 
-# Install browser-use package and all extras inside the venv using uv
-RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-    echo "[+] Installing browser-use library from source inside venv..." \
-    && uv sync --all-extras --locked --no-dev \
-    && which browser-use || true \
-    && browser-use --version 2>&1 || true \
-    && echo "[+] browser-use installed" | tee -a /VERSION.txt
+# Install browser-use package and all extras into the venv using pip (avoid uv sync at build-time)
+RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT <<'BASH'
+set -eux
+echo "[+] Installing browser-use package into venv via pip..."
+/app/.venv/bin/python -m pip install --upgrade pip setuptools wheel
+# Install the package itself (no-deps because extras were already installed), but keep it simple:
+# a) try to install package editable with extras if available, otherwise plain install
+/app/.venv/bin/python -m pip install --no-cache-dir .
+which browser-use || true
+browser-use --version 2>&1 || true
+echo "[+] browser-use installed" | tee -a /VERSION.txt
+BASH
 
 # Create data dirs and set ownership
 RUN mkdir -p "$DATA_DIR/profiles/default" \
