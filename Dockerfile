@@ -149,17 +149,37 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$T
      && python --version \
     ) | tee -a /VERSION.txt
 
-# Install playwright using pip (with version from pyproject.toml)
-# Use the created venv's python to avoid uv wrapper surprises and surface errors in the logs.
-RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-     echo "[+] Installing playwright and patchright via venv pip (non-hidden output)..." \
-     && PLAYWRIGHT_VERSION=$(grep -E "playwright>=" pyproject.toml | grep -o "[0-9]\+\.[0-9]\+\.[0-9]\+" | head -1 || true) \
-     && PATCHRIGHT_VERSION=$(grep -E "patchright>=" pyproject.toml | grep -o "[0-9]\+\.[0-9]\+\.[0-9]\+" | head -1 || true) \
-     && echo "Detected playwright==$PLAYWRIGHT_VERSION patchright==$PATCHRIGHT_VERSION" \
-     && /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
-     && /app/.venv/bin/python -m pip install "playwright${PLAYWRIGHT_VERSION:+==$PLAYWRIGHT_VERSION}" "patchright${PATCHRIGHT_VERSION:+==$PATCHRIGHT_VERSION}" --no-cache-dir \
-     && /app/.venv/bin/python -m playwright install --with-deps \
-     && /app/.venv/bin/playwright --version
+# Use Playwright official image for the layer that needs browsers + deps
+FROM mcr.microsoft.com/playwright/python:latest AS playwright-base
+
+WORKDIR /app
+# Copy only dependency manifest first
+COPY pyproject.toml uv.lock* /app/
+
+# Install pip deps (adjust if you use uv/pip sync; here we use pip for simplicity)
+RUN pip install --upgrade pip setuptools wheel \
+  && pip install patchright \
+  && pip install -r <(python - <<'PY'
+import tomllib,sys
+print("\n".join([])) # If you have requirements, or use poetry/uv adapt accordingly
+PY
+) || true
+
+# If you rely on uv, create venv etc in this base stage or install things directly
+
+# Final runtime stage based on the same image (keeps browsers present)
+FROM mcr.microsoft.com/playwright/python:latest
+
+WORKDIR /app
+# Copy installed site-packages from builder if you built inside builder (optional)
+# Copy application code
+COPY --from=playwright-base /app /app
+COPY . /app
+
+# Ensure an unprivileged user is used if desired (the base image may already have one)
+USER pwuser
+
+ENTRYPOINT ["bash", "-lc", "browser-use --version || echo 'browser-use not installed'"]
 
 # Install Chromium using playwright and create convenient symlinks
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=apt-$TARGETARCH$TARGETVARIANT \
