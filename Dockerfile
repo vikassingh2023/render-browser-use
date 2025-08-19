@@ -93,11 +93,42 @@ RUN /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
     && echo "[+] Playwright (system) version:" \
     && python -m playwright --version || true
 
-# Install browser-use python sub-dependencies using uv (no Playwright install here — base image already provides browsers)
+# Install python extras declared in pyproject.toml into the venv (fallback to pip if uv sync fails)
 RUN --mount=type=cache,target=/root/.cache,sharing=locked,id=cache-$TARGETARCH$TARGETVARIANT \
-    echo "[+] Installing browser-use pip sub-dependencies..." \
-    && uv sync --all-extras --no-dev --no-install-project \
-    && echo "[+] sub-deps installed" | tee -a /VERSION.txt
+  set -x \
+  && echo "[+] Installing python extras from pyproject.toml into venv ($VENV_DIR) via pip..." \
+  && /app/.venv/bin/python -m pip install --upgrade pip setuptools wheel \
+  && /app/.venv/bin/python - <<'PY' \
+import tomllib,sys,subprocess,shlex,os
+pt='pyproject.toml'
+if not os.path.exists(pt):
+    print('pyproject.toml not found; skipping extras installation')
+    sys.exit(0)
+data = tomllib.loads(open(pt,'rb').read())
+extras = []
+# PEP 621 style: project.optional-dependencies (dict keys are extra names)
+proj = data.get('project',{})
+if proj and proj.get('optional-dependencies'):
+    extras = list(proj['optional-dependencies'].keys())
+# Poetry style: tool.poetry.extras
+if not extras:
+    poetry = data.get('tool',{}).get('poetry',{})
+    if poetry and poetry.get('extras'):
+        extras = list(poetry['extras'].keys())
+if not extras:
+    print('No extras found in pyproject.toml; nothing to install')
+    sys.exit(0)
+print('Discovered extras:', extras)
+for ex in extras:
+    print('Installing extra:', ex)
+    # install package extras via pip into the venv
+    # use editable install so package is available during later build steps
+    cmd = [sys.executable, '-m', 'pip', 'install', f'.[{ex}]']
+    print('Running:', ' '.join(shlex.quote(c) for c in cmd))
+    subprocess.check_call(cmd)
+print('All extras installed successfully')
+PY
+  && echo "[+] pip extras install finished" | tee -a /VERSION.txt
 
 # Copy rest of repository
 COPY . /app
